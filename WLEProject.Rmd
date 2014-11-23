@@ -1,0 +1,406 @@
+---
+title: <center>Biceps Dumbbell Curl Data Analysis</center>
+output: html_document
+---
+
+```{r echo=FALSE,eval=TRUE}
+# Execute the following in the folder/directory
+#       that contains the data.
+
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(data.table))
+trainDT<-fread("pml-training.csv")
+testDT<-fread("pml-testing.csv")
+
+getDuplicates<-function(data.frame) {
+        originalNames <- names(data.frame)
+        number.of.duplicates <- length(originalNames) -        length(unique(originalNames))
+        names.that.are.duplicates <- names( table(originalNames)[table(originalNames)>1] )
+        if(length(names.that.are.duplicates)==0)
+                noDup<-c("There are no duplicate names.")
+        else 
+                names.that.are.duplicates
+}
+
+testDup<-getDuplicates(testDT)
+trainDup<-getDuplicates(trainDT)
+
+# Fixes a mispelling in the column names.
+
+origColNames<-names(trainDT)
+fixedColNames<-gsub('picth','pitch',origColNames)
+setnames(trainDT,origColNames,fixedColNames)
+
+origColNames<-names(testDT)
+fixedColNames<-gsub('picth','pitch',origColNames)
+setnames(testDT,origColNames,fixedColNames)
+
+# The last column of each dataset differs from the other dataset.
+#  	This is simply a check to make sure the remainder are properly named
+#		with each other.
+
+checkToBeSame<-identical(names(trainDT[,-160,with=FALSE]),names(testDT[,-160,with=FALSE]))
+
+count<-0
+remVector<-c(rep(NA,100))
+for(i in 1:160) {
+		elementDT<-testDT[[i]][1]
+		if( is.na(elementDT) ) {
+			for(j in 1:20) {
+				if(!is.na(elementDT[j]) ) break	
+			}
+			remVector[count+1] <- -i
+			count<-count+1
+		}
+		else
+		if( elementDT=='' ) {
+			for(j in 1:20) {
+				if(!elementDT=='') break
+			}
+			remVector[count+1] <- -i
+		 	count<-count+1
+		}
+}
+newTrainDT<-trainDT[,remVector,with=FALSE]
+newTestDT<-testDT[,remVector,with=FALSE]
+
+# Remove unneeded variables in the training set
+#       and change the response variable in the trainDT
+#       set to a factor.
+
+delCol<-c(-1,-2,-3,-4,-5,-6,-7)
+newTrainDT<-newTrainDT[,delCol,with=FALSE]
+newTestDT<-newTestDT[,delCol,with=FALSE]
+newTrainDT$classe<-as.factor(newTrainDT$classe)
+checkToBeSame<-identical(names(newTrainDT[,-53,with=FALSE]),names(newTestDT[,-53,with=FALSE]))
+
+# The following corrects 5 entries in the 5373rd event.
+#	There are many outliers in this set of data.  Most of
+#	them have an indeterminate origin.  These, however,
+#	are so far from the comparable entries in other events
+#	that one must assume they are a mistake of some sort.
+# 	Therefore, values were imputed to address those mistakes.
+#	The subject variables are approximately normally  distributed,
+#   thus the use of rnorm to generate imputed values.
+
+set.seed(91788)
+newTrainDT$gyros_forearm_y[5373]<-rnorm(1,mean(newTrainDT$gyros_forearm_y[-5373]),sd(newTrainDT$gyros_forearm_y[-5373]))
+newTrainDT$gyros_forearm_z[5373]<-rnorm(1,mean(newTrainDT$gyros_forearm_z[-5373]),sd(newTrainDT$gyros_forearm_z[-5373]))
+newTrainDT$gyros_dumbbell_x[5373]<-rnorm(1,mean(newTrainDT$gyros_dumbbell_x[-5373]),sd(newTrainDT$gyros_dumbbell_x[-5373]))
+newTrainDT$gyros_dumbbell_y[5373]<-rnorm(1,mean(newTrainDT$gyros_dumbbell_y[-5373]),sd(newTrainDT$gyros_dumbbell_y[-5373]))
+newTrainDT$gyros_dumbbell_z[5373]<-rnorm(1,mean(newTrainDT$gyros_dumbbell_z[-5373]),sd(newTrainDT$gyros_dumbbell_z[-5373])) 
+
+# Now we can start analyzing the data.
+
+suppressPackageStartupMessages(library(randomForest))
+
+# Partition the training data to provide a training subset and
+# 	an evaluation subset.
+
+indexPartition<-createDataPartition(y=newTrainDT$classe, p=0.895, list=FALSE)
+trainingSet<-newTrainDT[as.vector(indexPartition),]
+evalSet<-newTrainDT[-as.vector(indexPartition),]
+
+# Some boxplots for outlier illustration.
+
+png(file="plot3.png",width=640, height=480, bg="transparent")
+par(mfrow=c(2,2))
+boxplot(trainingSet[,2,with=FALSE],main="pitch_belt")
+boxplot(trainingSet[,3,with=FALSE],main="yaw_belt")
+boxplot(trainingSet[,31,with=FALSE],main="gyros_dumbell_x")
+boxplot(trainingSet[,38,with=FALSE],main="magnet_dumbell_y")
+d.off<-dev.off()
+
+# Look at correlations
+
+corMatrix<-abs(cor(newTrainDT[,-53,with=FALSE]))
+diag(corMatrix)<-0
+highCorPairs<-which(corMatrix > 0.8, arr.ind=TRUE)
+
+# Fit a random Forest
+
+rfFit<-randomForest(classe ~ .,data=trainingSet, ntree=500)
+garbageCollect<-gc()
+
+# Use the eval set to check the importance of variables to the fit
+# Plot the importance of the variables. This will probably allow
+#       us to reduce the numer of variables and refit to get
+#       a more compact model
+
+png(file="plot1.png",width=640, height=480, bg="transparent")
+varImpPlot(rfFit,n.var=25,pch=19,col="grey60",main="Initial Fit, Bicep Dumbbell Curl")
+d.off<-dev.off()
+
+#dev.print(device=pdf, ,plot1,file="plot1.png", width=640, height=480, bg="transparent")
+#d.off<-dev.off() ; d.off<-dev.off()
+
+# The following code reduces the number of variables in the training
+#	set to 13 based on the above plot.  This is somewhat subjective,but
+# 	it looks as if these top variables are causing most of the variance.
+
+secondTrainSetColNums<-c(order(-importance(rfFit))[1:13],53)
+secondTrainSet<-trainingSet[,secondTrainSetColNums,with=FALSE]
+secondEvalSet<-evalSet[,secondTrainSetColNums,with=FALSE]
+rfFitTruncated<-randomForest(classe ~ .,data=secondTrainSet, ntree=500)
+answersTwo<-predict(rfFitTruncated,secondEvalSet)
+cf<-confusionMatrix(answersTwo,evalSet$classe)
+errorTable<-table(answersTwo,evalSet$classe)
+
+# Again do a variable importance plot to show the reduction in variable
+#       numbers as well as the contribution of the variables to the
+#       structure of the trees.
+png(file="plot2.png", width=640, height=480, bg="transparent")
+varImpPlot(rfFitTruncated,n.var=13,pch=19,col="grey60",main="Final Fit, Bicep Dumbbell Curl")
+d.off<-dev.off()
+
+# Finally, we have the means to run the classification tree against
+#       the given training set.  This produces the answers that
+#       are submitted as part 2 of this project.
+
+answersSubmit<-predict(rfFitTruncated, newTestDT[,-53,with=FALSE])
+
+```
+
+
+#### Synopsis:  
+
+The data was originally collected in support of a project to develop machine learning algorithms to identify proper execution of a dumbbell bicep curl. We have taken the data, reduced it in scope to retain only those variables that directly relate to the physical act of doing a bicep dumbbell curl.  Because the data records the actions of six humans and is categorized in a partially subjective manner, it is noisy.^[3]^  We use the random forest analysis technique because of the noise and the lack of linearity.  Our analysis develops a Random Forest of 500 trees which is then used to predict one of five categories (A through E) of bicep dumbbell curl execution, only one of which is deemed correct (E).^[3]^ The developed random forest predicts the quality of bicep dumbbell curls with an accuracy of 0.9927; the 95% confidence interval is 0.988 to 0.9959. We thank the authors of bibliographic entry number 3 for the use of their data.
+
+#### The Data:
+
+The data consists of a training and a test set.  The training set has 19,622 entries of 160 variables each;  the test set has 20 entries of 160 variables each.  An examination of both sets shows many missing variables.  The test set has 100 columns that are either empty or have all NA entries. Those columns are removed leaving a test set of 20 entries with 60 variables. We then remove the same columns from the training set leaving 19,622 entries with 60 variables each. A variable name misspelling is corrected in both sets. A check for duplicate variable names is done; none are found.   An examination of the remaining variables indicates the first seven columns do not contain information relevant to our analysis, those columns in both sets are removed as well. There remain 53 variables in each set.
+
+The data was checked to detect outliers.  Boxplots and data summaries were used to identify them (see figure 1., Appendix A., for an example).  Of the 53 variables, most contained outliers.  An examination of those showed that one event had a number of single variable outliers; that was event number 5373.  Five variables in the event had outliers that were clearly erroneous.  Those five variables were replaced with imputed values. The remaining outliers were left as given.
+
+#### Cross Validation:  
+
+Explicit cross validation is unnecessary when using random forest because each tree is produced from a bootstrap sample taken from the original data.^[2]^  Approximately two-thirds of the bootstrap sample are used to construct a tree.  The remaining third (the out-of-bag cases, OOB), of the sample are run through the tree to obtain a test classification. The test classification is compared to the actual classification to derive an estimate of the OOB errors.^[3]^ This is cross validation within the random forest procedure.  
+
+We do, however, split the training data set to generate a training set and an evaluation set.  This allows us to develop the model, evaluate it prior to actual use, and obtain out of sample errors without using the test set.
+
+#### Analysis:
+
+The training data is highly correlated.  Here is an extraction of the correlation matrix for the variable pairs with correlations greater than 0.80:
+```{r echo=FALSE,eval=TRUE}
+highCorPairs
+```
+The training data display many outliers in most of the variables.  As noted above there are many outliers.  We fit a Random Forest model to these variables.  Figure 2., Appendix A., shows a plot displaying the top 25 important variables of the 53 used in the fit. We attempt to reduce the number of variables in the model by running a second Random Forest fit using the top 13 of the important variables that have been identified here. Figure 3., Appendix A., shows the the Mean Gini Decrease for
+these variables. The model fitted has the following characteristics:
+
+```{r echo=FALSE,eval=TRUE}
+rfFitTruncated
+```
+When the evaluation set is classified by the model we obtain the following:
+```{r echo=FALSE,eval=TRUE}
+confusionMatrix(answersTwo,evalSet$classe)
+```
+This gives an out of sample error rate of 0.0073, and an accuracy of 0.9927.
+
+When the test set is classified by the model we obtain the following:
+```{r echo=FALSE,eval=TRUE}
+answersSubmit
+```
+The commented R code used in the analysis is in Appendix B. 
+
+#### Conclusion:
+
+The Random Forest model accommodates noisy data.  It automates many of the tasks normally facing the modeler.  It can be relatively slow if a large forest is desired, or if there has been no preprocessing of the data to reduce dimensionality and noise. It can produce models that seem quite precise, but that may be overfitting. It should be noted that the authors assert that overfitting does not occur.^[1]^
+
+***********************************
+
+<center>__Appendix A.__</center>
+<br>
+<center>__Figure 1.__</center>   
+
+<center>
+![](/Users/sublett/Documents/DataAnalysis/MachineLearning/Project/plot3.png)     
+</center>
+
+<center>__Figure 2.__</center>   
+
+<center>
+![](/Users/sublett/Documents/DataAnalysis/MachineLearning/Project/plot1.png)     
+</center>
+<br>
+
+<center>__Figure 3.__</center>  
+
+<center>
+![](/Users/sublett/Documents/DataAnalysis/MachineLearning/Project/plot2.png)     
+</center>
+
+
+***********************
+
+<center>__Appendix B.__</center>
+<br>
+
+```{r echo=TRUE,eval=FALSE}
+# Execute the following in the folder/directory
+#       that contains the data.
+
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(data.table))
+trainDT<-fread("pml-training.csv")
+testDT<-fread("pml-testing.csv")
+
+getDuplicates<-function(data.frame) {
+        originalNames <- names(data.frame)
+        number.of.duplicates <- length(originalNames) -        length(unique(originalNames))
+        names.that.are.duplicates <- names( table(originalNames)[table(originalNames)>1] )
+        if(length(names.that.are.duplicates)==0)
+                noDup<-c("There are no duplicate names.")
+        else 
+                names.that.are.duplicates
+}
+
+testDup<-getDuplicates(testDT)
+trainDup<-getDuplicates(trainDT)
+
+# Fixes a mispelling in the column names.
+
+origColNames<-names(trainDT)
+fixedColNames<-gsub('picth','pitch',origColNames)
+setnames(trainDT,origColNames,fixedColNames)
+
+origColNames<-names(testDT)
+fixedColNames<-gsub('picth','pitch',origColNames)
+setnames(testDT,origColNames,fixedColNames)
+
+# The last column of each dataset differs from the other dataset.
+#          This is simply a check to make sure the remainder are properly named
+#		with each other.
+
+checkToBeSame<-identical(names(trainDT[,-160,with=FALSE]),names(testDT[,-160,with=FALSE]))
+
+count<-0
+remVector<-c(rep(NA,100))
+for(i in 1:160) {
+		elementDT<-testDT[[i]][1]
+		if( is.na(elementDT) ) {
+			for(j in 1:20) {
+				if(!is.na(elementDT[j]) ) break	
+			}
+			remVector[count+1] <- -i
+			count<-count+1
+		}
+		else
+		if( elementDT=='' ) {
+			for(j in 1:20) {
+				if(!elementDT=='') break
+			}
+			remVector[count+1] <- -i
+		 	count<-count+1
+		}
+}
+newTrainDT<-trainDT[,remVector,with=FALSE]
+newTestDT<-testDT[,remVector,with=FALSE]
+
+# Remove unneeded variables in the training set
+#       and change the response variable in the trainDT
+#       set to a factor.
+
+delCol<-c(-1,-2,-3,-4,-5,-6,-7)
+newTrainDT<-newTrainDT[,delCol,with=FALSE]
+newTestDT<-newTestDT[,delCol,with=FALSE]
+newTrainDT$classe<-as.factor(newTrainDT$classe)
+checkToBeSame<-identical(names(newTrainDT[,-53,with=FALSE]),names(newTestDT[,-53,with=FALSE]))
+
+# The following corrects 5 entries in the 5373rd event.
+#	There are many outliers in this set of data.  Most of
+#	them have an indeterminate origin.  These, however,
+#	are so far from the comparable entries in other events
+#	that one must assume they are a mistake of some sort.
+# 	Therefore, values were imputed to address those mistakes.
+#	The subject variables are approximately normally  distributed,
+#   thus the use of rnorm to generate imputed values.
+
+set.seed(91788)
+newTrainDT$gyros_forearm_y[5373]<-rnorm(1,mean(newTrainDT$gyros_forearm_y[-5373]),sd(newTrainDT$gyros_forearm_y[-5373]))
+newTrainDT$gyros_forearm_z[5373]<-rnorm(1,mean(newTrainDT$gyros_forearm_z[-5373]),sd(newTrainDT$gyros_forearm_z[-5373]))
+newTrainDT$gyros_dumbbell_x[5373]<-rnorm(1,mean(newTrainDT$gyros_dumbbell_x[-5373]),sd(newTrainDT$gyros_dumbbell_x[-5373]))
+newTrainDT$gyros_dumbbell_y[5373]<-rnorm(1,mean(newTrainDT$gyros_dumbbell_y[-5373]),sd(newTrainDT$gyros_dumbbell_y[-5373]))
+newTrainDT$gyros_dumbbell_z[5373]<-rnorm(1,mean(newTrainDT$gyros_dumbbell_z[-5373]),sd(newTrainDT$gyros_dumbbell_z[-5373])) 
+
+# Now we can start analyzing the data.
+
+suppressPackageStartupMessages(library(randomForest))
+
+# Partition the training data to provide a training subset and
+# 	an evaluation subset.
+
+indexPartition<-createDataPartition(y=newTrainDT$classe, p=0.895, list=FALSE)
+trainingSet<-newTrainDT[as.vector(indexPartition),]
+evalSet<-newTrainDT[-as.vector(indexPartition),]
+
+# Some boxplots for outlier illustration.
+
+png(file="plot3.png",width=640, height=480, bg="transparent")
+par(mfrow=c(2,2))
+boxplot(trainingSet[,2,with=FALSE],main="pitch_belt")
+boxplot(trainingSet[,3,with=FALSE],main="yaw_belt")
+boxplot(trainingSet[,31,with=FALSE],main="gyros_dumbell_x")
+boxplot(trainingSet[,38,with=FALSE],main="magnet_dumbell_y")
+d.off<-dev.off()
+
+# Look at correlations
+
+corMatrix<-abs(cor(newTrainDT[,-53,with=FALSE]))
+diag(corMatrix)<-0
+highCorPairs<-which(corMatrix > 0.8, arr.ind=TRUE)
+
+# Fit a random Forest
+
+rfFit<-randomForest(classe ~ .,data=trainingSet, ntree=500)
+garbageCollect<-gc()
+
+# Use the eval set to check the importance of variables to the fit
+# Plot the importance of the variables. This will probably allow
+#       us to reduce the numer of variables and refit to get
+#       a more compact model
+
+png(file="plot1.png",width=640, height=480, bg="transparent")
+varImpPlot(rfFit,n.var=25,pch=19,col="grey60",main="Initial Fit, Bicep Dumbbell Curl")
+d.off<-dev.off()
+
+#dev.print(device=pdf, ,plot1,file="plot1.png", width=640, height=480, bg="transparent")
+#d.off<-dev.off() ; d.off<-dev.off()
+
+# The following code reduces the number of variables in the training
+#	set to 13 based on the above plot.  This is somewhat subjective,but
+# 	it looks as if these top variables are causing most of the variance.
+
+secondTrainSetColNums<-c(order(-importance(rfFit))[1:13],53)
+secondTrainSet<-trainingSet[,secondTrainSetColNums,with=FALSE]
+secondEvalSet<-evalSet[,secondTrainSetColNums,with=FALSE]
+rfFitTruncated<-randomForest(classe ~ .,data=secondTrainSet, ntree=500)
+answersTwo<-predict(rfFitTruncated,secondEvalSet)
+cf<-confusionMatrix(answersTwo,evalSet$classe)
+errorTable<-table(answersTwo,evalSet$classe)
+
+# Again do a variable importance plot to show the reduction in variable
+#       numbers as well as the contribution of the variables to the
+#       structure of the trees.
+png(file="plot2.png", width=640, height=480, bg="transparent")
+varImpPlot(rfFitTruncated,n.var=13,pch=19,col="grey60",main="Final Fit, Bicep Dumbbell Curl")
+d.off<-dev.off()
+
+# Finally, we have the means to run the classification tree against
+#       the given training set.  This produces the answers that
+#       are submitted as part 2 of this project.
+
+answersSubmit<-predict(rfFitTruncated, newTestDT[,-53,with=FALSE])
+
+```
+
+
+
+
+***********************
+#### Bibliography 
+1. Breiman, Leo and Cutler, Adele, _Random Forests, Classification/Clustering_, http://www.stat.berkeley.edu/~breiman/RandomForests/.  
+
+2. Everitt, Brian S. and Hothorn, Torsten, _A Handbook of Statistical Analyses Using R_, Chapman and Hall/CRC, Boca Raton, FL., 2006.
+
+3. Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H., _Qualitative Activity Recognition of Weight Lifting Exercises_, Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13), Stuttgart, Germany: ACM SIGCHI, 2013.
+
